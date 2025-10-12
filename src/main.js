@@ -1,3 +1,7 @@
+// Polyfills for Safari & older browsers (ensures async/await, Promises, etc. work)
+import "core-js/stable";
+import "regenerator-runtime/runtime";
+
 import * as THREE from "three";
 import { MindARThree } from "mind-ar/dist/mindar-face-three.prod.js";
 
@@ -36,9 +40,7 @@ const createBackground = (scene) => {
     const xPos = side * (3.5 + Math.random() * 1.5);
     const zPos = -2 - i * 2;
 
-    // Random height for variation
-    building.scale.y = 1 + Math.random() * 1.5;
-
+    building.scale.y = 1 + Math.random() * 1.5; // random height for variation
     building.position.set(xPos, 0, zPos);
     backgroundGroup.add(building);
     buildings.push(building);
@@ -48,6 +50,7 @@ const createBackground = (scene) => {
 const updateBackground = (isBlowing) => {
   targetSpeed = isBlowing ? MAX_SPEED : 0;
 
+  // Smooth acceleration/deceleration for consistent animation across browsers
   if (backgroundSpeed < targetSpeed) {
     backgroundSpeed = Math.min(backgroundSpeed + ACCELERATION, targetSpeed);
   } else if (backgroundSpeed > targetSpeed) {
@@ -56,13 +59,13 @@ const updateBackground = (isBlowing) => {
 
   backgroundGroup.position.z += backgroundSpeed;
 
-  // Reset buildings
+  // Reset buildings once they move out of view
   buildings.forEach((building) => {
     if (building.position.z + backgroundGroup.position.z > 2) {
-      building.position.z -= 40; // more total length
+      building.position.z -= 40;
       const side = Math.random() > 0.5 ? 1 : -1;
       building.position.x = side * (3.5 + Math.random() * 1.5);
-      building.scale.y = 1 + Math.random() * 1.5; // random height
+      building.scale.y = 1 + Math.random() * 1.5;
     }
   });
 
@@ -76,21 +79,25 @@ const updateSpeedIndicator = (speed) => {
   const percentage = Math.round((speed / MAX_SPEED) * 100);
   speedometer.textContent = `Speed: ${percentage}%`;
 
+  // Dynamic color feedback
   if (percentage > 70) speedometer.style.color = "#ff4444";
   else if (percentage > 30) speedometer.style.color = "#ffaa44";
   else speedometer.style.color = "#44ff44";
 };
 
 const setup = async () => {
+  // Added Safari-safe worker & wasm paths
   mindarThree = new MindARThree({
     container: document.querySelector("#container"),
     maxTrack: 1,
     filterMinCF: 0.001,
+    workerUrl: new URL("mindar-face-worker.js", import.meta.url).href,
+    wasmUrl: new URL("mindar-face.wasm", import.meta.url).href,
   });
 
-  const { scene, camera } = mindarThree;
+  const { scene } = mindarThree;
 
-  // Lighting
+  // Lighting setup
   const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
   scene.add(light);
 
@@ -98,16 +105,25 @@ const setup = async () => {
   directionalLight.position.set(0, 1, 1);
   scene.add(directionalLight);
 
-  // Environment map for reflections
-  const envTexture = new THREE.CubeTextureLoader()
-    .setPath("/textures/cubemap/")
-    .load(["px.jpg", "nx.jpg", "py.jpg", "ny.jpg", "pz.jpg", "nz.jpg"]);
-  scene.environment = envTexture;
+  // Environment map with try-catch for Safari texture loading issues
+  try {
+    const envTexture = new THREE.CubeTextureLoader()
+      .setPath("/textures/cubemap/")
+      .load(
+        ["px.jpg", "nx.jpg", "py.jpg", "ny.jpg", "pz.jpg", "nz.jpg"],
+        () => console.log("Env map loaded"),
+        undefined,
+        (err) => console.warn("Env map load failed:", err)
+      );
+    scene.environment = envTexture;
+  } catch (e) {
+    console.warn("Safari texture issue:", e);
+  }
 
-  // Background
+  // Background setup
   createBackground(scene);
 
-  // Cube
+  // Cube setup
   const geometry = new THREE.BoxGeometry(0.3, 0.3, 0.3);
   const material = new THREE.MeshPhysicalMaterial({
     color: originalColor,
@@ -126,44 +142,67 @@ const setup = async () => {
 
   const anchor = mindarThree.addAnchor(0);
   anchor.group.add(cube);
-
   cube.position.set(0, 0.5, 0);
 
-  updateStatus("Setup complete. Starting camera...");
+  updateStatus("Setup complete. Tap to start camera...");
 };
 
 const start = async () => {
   try {
     if (!mindarThree) await setup();
-    await mindarThree.start();
-
-    const { renderer, camera, video } = mindarThree;
-
-    updateStatus("Tracking active. Blow to move forward!");
 
     const videoEl = document.querySelector("#camera-preview");
-    if (video && videoEl) {
-      videoEl.srcObject = video.srcObject || video.captureStream();
-    }
-    video.style.display = "none";
 
-    renderer.setAnimationLoop(() => {
-      const estimate = mindarThree.getLatestEstimate();
-      let isBlowing = false;
+    // Safari autoplay fix: muted + playsinline
+    videoEl.setAttribute("playsinline", true);
+    videoEl.setAttribute("autoplay", true);
+    videoEl.muted = true;
 
-      if (estimate && estimate.blendshapes) {
-        isBlowing = handleBlendshapes(estimate.blendshapes);
+    // Safari camera permission workaround — needs user gesture
+    const enableCamera = async () => {
+      document.body.removeEventListener("click", enableCamera);
+      await mindarThree.start();
+
+      const { renderer, camera, video } = mindarThree;
+
+      updateStatus("Tracking active. Blow to move forward!");
+
+      // Keep video preview (your camera) visible at bottom-left only
+      if (video && videoEl) {
+        videoEl.srcObject = video.srcObject || video.captureStream();
+        try {
+          await videoEl.play();
+        } catch (e) {
+          console.warn("Safari blocked video.play():", e);
+        }
       }
 
-      // Fixed visual size
-      if (estimate && typeof estimate.scale === "number") {
-        const invScale = 1 / estimate.scale;
-        cube.scale.setScalar(cube.userData.baseScale * invScale);
-      }
+      // Hide the internal MindAR video (so only your preview shows)
+      if (video) video.style.display = "none";
 
-      updateBackground(isBlowing);
-      renderer.render(mindarThree.scene, camera);
-    });
+      // Main animation loop
+      renderer.setAnimationLoop(() => {
+        const estimate = mindarThree.getLatestEstimate();
+        let isBlowing = false;
+
+        if (estimate && estimate.blendshapes) {
+          isBlowing = handleBlendshapes(estimate.blendshapes);
+        }
+
+        // Keep cube scale consistent based on face distance
+        if (estimate && typeof estimate.scale === "number") {
+          const invScale = 1 / estimate.scale;
+          cube.scale.setScalar(cube.userData.baseScale * invScale);
+        }
+
+        updateBackground(isBlowing);
+        renderer.render(mindarThree.scene, camera);
+      });
+    };
+
+    // Attach the user interaction listener
+    document.body.addEventListener("click", enableCamera);
+    updateStatus("👆 Tap anywhere to enable camera");
   } catch (err) {
     console.error(err);
     updateStatus("Error: " + err.message);
@@ -212,4 +251,5 @@ const updateStatus = (msg) => {
   if (statusEl) statusEl.textContent = msg;
 };
 
+// Start on load
 start();
