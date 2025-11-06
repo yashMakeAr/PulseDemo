@@ -1,12 +1,23 @@
 import "core-js/stable";
 import "regenerator-runtime/runtime";
+
+// Fix for Samsung TFLite crash
+self.Module = {
+  tfliteWasmSimdEnabled: false,
+  tfliteWasmMultiThreadEnabled: false,
+  tfliteXnnpackDelegateEnabled: false,
+};
+
+// Optional: hide TensorFlow info logs
+const originalConsoleInfo = console.info;
+console.info = function (...args) {
+  if (!args[0]?.includes?.("TensorFlow Lite")) {
+    originalConsoleInfo.apply(console, args);
+  }
+};
+
 import * as THREE from "three";
 import { MindARThree } from "mind-ar/dist/mindar-face-three.prod.js";
-
-// CRITICAL: Disable XNNPACK to prevent Samsung crashes
-if (typeof window !== "undefined") {
-  window.MEDIAPIPE_DISABLE_XNNPACK = true;
-}
 
 let mindarThree = null;
 let cube = null;
@@ -26,29 +37,16 @@ const updateStatus = (msg) => {
   if (el) el.textContent = msg;
 };
 
-// Detect if device is likely to have issues (Samsung, high-res displays)
-const isProblematicDevice = () => {
-  const ua = navigator.userAgent.toLowerCase();
-  const isSamsung = ua.includes("samsung") || ua.includes("sm-");
-  const isHighDPI = window.devicePixelRatio > 2;
-  return isSamsung || isHighDPI;
-};
-
-// Adaptive camera constraints based on device
+// Limit camera resolution for Samsung (prevents WebGL crash)
 async function getConstrainedCameraStream() {
-  const problematic = isProblematicDevice();
-
   const constraints = {
     video: {
       facingMode: "user",
-      // Lower resolution for problematic devices
-      width: { ideal: problematic ? 480 : 640 },
-      height: { ideal: problematic ? 360 : 480 },
-      frameRate: { ideal: 30, max: 30 }, // Limit frame rate
+      width: { ideal: 640 },
+      height: { ideal: 480 },
     },
     audio: false,
   };
-
   try {
     return await navigator.mediaDevices.getUserMedia(constraints);
   } catch (err) {
@@ -62,13 +60,10 @@ const createBackground = (scene) => {
   backgroundGroup = new THREE.Group();
   scene.add(backgroundGroup);
 
-  // Reduce geometry complexity for better performance
-  const buildingGeom = new THREE.BoxGeometry(0.5, 1.5, 0.5, 1, 1, 1);
-
+  const buildingGeom = new THREE.BoxGeometry(0.5, 1.5, 0.5);
   for (let i = 0; i < 20; i++) {
     const mat = new THREE.MeshPhongMaterial({
       color: new THREE.Color().setHSL(Math.random(), 0.5, 0.5),
-      flatShading: true, // Better performance
     });
     const b = new THREE.Mesh(buildingGeom, mat);
     const side = Math.random() > 0.5 ? 1 : -1;
@@ -132,63 +127,39 @@ const handleBlendshapes = (blendshapes) => {
 };
 
 async function setup() {
-  const problematic = isProblematicDevice();
-
   mindarThree = new MindARThree({
     container: document.querySelector("#container"),
     maxTrack: 1,
-    // More conservative filtering for problematic devices
-    filterMinCF: problematic ? 0.01 : 0.001,
-    filterBeta: problematic ? 10 : 1000,
+    filterMinCF: 0.001,
     workerUrl: new URL("mindar-face-worker.js", import.meta.url).href,
     wasmUrl: new URL("mindar-face.wasm", import.meta.url).href,
   });
 
-  const { renderer, scene } = mindarThree;
-
-  // Optimize renderer for mobile
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Cap at 2x
-  renderer.powerPreference = "high-performance";
-
-  // Disable antialiasing on problematic devices for better performance
-  if (problematic) {
-    renderer.antialias = false;
-  }
+  const { scene } = mindarThree;
 
   scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1));
   const dir = new THREE.DirectionalLight(0xffffff, 0.6);
   dir.position.set(0, 1, 1);
   scene.add(dir);
 
-  // Skip environment map on problematic devices to reduce memory
-  if (!problematic) {
-    try {
-      const env = new THREE.CubeTextureLoader()
-        .setPath("/textures/cubemap/")
-        .load(["px.jpg", "nx.jpg", "py.jpg", "ny.jpg", "pz.jpg", "nz.jpg"]);
-      scene.environment = env;
-    } catch {
-      console.warn("Env map skipped");
-    }
+  try {
+    const env = new THREE.CubeTextureLoader()
+      .setPath("/textures/cubemap/")
+      .load(["px.jpg", "nx.jpg", "py.jpg", "ny.jpg", "pz.jpg", "nz.jpg"]);
+    scene.environment = env;
+  } catch {
+    console.warn("Env map skipped");
   }
 
   createBackground(scene);
 
-  const geo = new THREE.BoxGeometry(0.3, 0.3, 0.3, 1, 1, 1); // Simplified geometry
-
-  // Use simpler material on problematic devices
-  const mat = problematic
-    ? new THREE.MeshPhongMaterial({
-        color: COLORS.normal,
-        shininess: 30,
-      })
-    : new THREE.MeshPhysicalMaterial({
-        color: COLORS.normal,
-        metalness: 0.7,
-        roughness: 0.3,
-        clearcoat: 1.0,
-      });
-
+  const geo = new THREE.BoxGeometry(0.3, 0.3, 0.3);
+  const mat = new THREE.MeshPhysicalMaterial({
+    color: COLORS.normal,
+    metalness: 0.7,
+    roughness: 0.3,
+    clearcoat: 1.0,
+  });
   cube = new THREE.Mesh(geo, mat);
   cube.userData.baseScale = 1;
 
@@ -199,67 +170,43 @@ async function setup() {
 
 async function start() {
   updateStatus("Initializing...");
-
-  try {
-    await setup();
-  } catch (err) {
-    console.error("Setup failed:", err);
-    updateStatus("Setup failed: " + err.message);
-    return;
-  }
+  await setup();
 
   const videoEl = document.querySelector("#camera-preview");
   videoEl.setAttribute("playsinline", true);
-  videoEl.setAttribute("webkit-playsinline", true); // iOS fix
   videoEl.muted = true;
 
   const enable = async () => {
     document.body.removeEventListener("click", enable);
     updateStatus("Starting camera...");
 
-    try {
-      const stream = await getConstrainedCameraStream();
-      videoEl.srcObject = stream;
-      await videoEl.play();
+    const stream = await getConstrainedCameraStream();
+    videoEl.srcObject = stream;
+    await videoEl.play();
 
-      await mindarThree.start({ video: videoEl });
-      const { renderer, camera } = mindarThree;
+    await mindarThree.start({ video: videoEl });
+    const { renderer, camera } = mindarThree;
 
-      updateStatus("Tracking started — blow to move 🚀");
+    updateStatus("Tracking started — blow to move 🚀");
 
-      renderer.setAnimationLoop(() => {
-        const est = mindarThree.getLatestEstimate();
-        const blowing = est?.blendshapes
-          ? handleBlendshapes(est.blendshapes)
-          : false;
+    renderer.setAnimationLoop(() => {
+      const est = mindarThree.getLatestEstimate();
+      const blowing = est?.blendshapes
+        ? handleBlendshapes(est.blendshapes)
+        : false;
 
-        if (est?.scale) {
-          const inv = 1 / est.scale;
-          cube.scale.setScalar(cube.userData.baseScale * inv);
-        }
+      if (est?.scale) {
+        const inv = 1 / est.scale;
+        cube.scale.setScalar(cube.userData.baseScale * inv);
+      }
 
-        updateBackground(blowing);
-        renderer.render(mindarThree.scene, camera);
-      });
-    } catch (err) {
-      console.error("Start failed:", err);
-      updateStatus("Failed to start: " + err.message);
-    }
+      updateBackground(blowing);
+      renderer.render(mindarThree.scene, camera);
+    });
   };
 
   document.body.addEventListener("click", enable);
   updateStatus("👆 Tap to start camera");
 }
-
-// Add error boundary
-window.addEventListener("error", (e) => {
-  console.error("Global error:", e.error);
-  updateStatus("Error: " + e.message);
-});
-
-window.addEventListener("unhandledrejection", (e) => {
-  console.error("Unhandled promise rejection:", e.reason);
-  updateStatus("Error: " + e.reason);
-});
 
 start();
