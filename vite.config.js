@@ -9,5 +9,9 @@ export default defineConfig({
       "Cross-Origin-Embedder-Policy": "require-corp",
       "Cross-Origin-Opener-Policy": "same-origin",
     },
+    mimeTypes: {
+      "application/wasm": ["wasm"],
+      "application/javascript": ["js"],
+    },
   },
 });

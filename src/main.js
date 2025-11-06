@@ -1,211 +1,89 @@
-// Polyfills for Safari & older browsers (ensures async/await, Promises, etc. work)
 import "core-js/stable";
 import "regenerator-runtime/runtime";
-
 import * as THREE from "three";
 import { MindARThree } from "mind-ar/dist/mindar-face-three.prod.js";
 
 let mindarThree = null;
 let cube = null;
-let originalColor = 0x00ff00;
-let alertColor = 0xff0000;
+let backgroundGroup = null;
+let buildings = [];
 
-const MOUTH_BLOW_THRESHOLD = 0.5;
-
-// Background movement variables
+const COLORS = { normal: 0x00ff00, alert: 0xff0000 };
+const MOUTH_THRESHOLD = 0.5;
 let backgroundSpeed = 0;
 let targetSpeed = 0;
 const MAX_SPEED = 0.5;
-const ACCELERATION = 0.002;
-const DECELERATION = 0.001;
+const ACCEL = 0.002;
+const DECEL = 0.001;
 
-// Background elements
-let backgroundGroup = null;
-let buildings = [];
+const updateStatus = (msg) => {
+  const el = document.querySelector("#status");
+  if (el) el.textContent = msg;
+};
+
+// Limit camera resolution for Samsung (prevents WebGL crash)
+async function getConstrainedCameraStream() {
+  const constraints = {
+    video: {
+      facingMode: "user",
+      width: { ideal: 640 },
+      height: { ideal: 480 },
+    },
+    audio: false,
+  };
+  try {
+    return await navigator.mediaDevices.getUserMedia(constraints);
+  } catch (err) {
+    console.error("Camera init failed:", err);
+    updateStatus("Camera access denied: " + err.message);
+    throw err;
+  }
+}
 
 const createBackground = (scene) => {
   backgroundGroup = new THREE.Group();
   scene.add(backgroundGroup);
 
-  const buildingGeometry = new THREE.BoxGeometry(0.5, 1.5, 0.5);
-  const buildingCount = 20;
-
-  for (let i = 0; i < buildingCount; i++) {
-    const material = new THREE.MeshPhongMaterial({
+  const buildingGeom = new THREE.BoxGeometry(0.5, 1.5, 0.5);
+  for (let i = 0; i < 20; i++) {
+    const mat = new THREE.MeshPhongMaterial({
       color: new THREE.Color().setHSL(Math.random(), 0.5, 0.5),
     });
-    const building = new THREE.Mesh(buildingGeometry, material);
-
+    const b = new THREE.Mesh(buildingGeom, mat);
     const side = Math.random() > 0.5 ? 1 : -1;
-    const xPos = side * (3.5 + Math.random() * 1.5);
-    const zPos = -2 - i * 2;
-
-    building.scale.y = 1 + Math.random() * 1.5; // random height for variation
-    building.position.set(xPos, 0, zPos);
-    backgroundGroup.add(building);
-    buildings.push(building);
+    const x = side * (3.5 + Math.random() * 1.5);
+    const z = -2 - i * 2;
+    b.scale.y = 1 + Math.random() * 1.5;
+    b.position.set(x, 0, z);
+    backgroundGroup.add(b);
+    buildings.push(b);
   }
 };
 
 const updateBackground = (isBlowing) => {
   targetSpeed = isBlowing ? MAX_SPEED : 0;
-
-  // Smooth acceleration/deceleration for consistent animation across browsers
-  if (backgroundSpeed < targetSpeed) {
-    backgroundSpeed = Math.min(backgroundSpeed + ACCELERATION, targetSpeed);
-  } else if (backgroundSpeed > targetSpeed) {
-    backgroundSpeed = Math.max(backgroundSpeed - DECELERATION, targetSpeed);
-  }
+  backgroundSpeed =
+    backgroundSpeed < targetSpeed
+      ? Math.min(backgroundSpeed + ACCEL, targetSpeed)
+      : Math.max(backgroundSpeed - DECEL, targetSpeed);
 
   backgroundGroup.position.z += backgroundSpeed;
 
-  // Reset buildings once they move out of view
-  buildings.forEach((building) => {
-    if (building.position.z + backgroundGroup.position.z > 2) {
-      building.position.z -= 40;
+  buildings.forEach((b) => {
+    if (b.position.z + backgroundGroup.position.z > 2) {
+      b.position.z -= 40;
       const side = Math.random() > 0.5 ? 1 : -1;
-      building.position.x = side * (3.5 + Math.random() * 1.5);
-      building.scale.y = 1 + Math.random() * 1.5;
+      b.position.x = side * (3.5 + Math.random() * 1.5);
+      b.scale.y = 1 + Math.random() * 1.5;
     }
   });
 
-  updateSpeedIndicator(backgroundSpeed);
-};
-
-const updateSpeedIndicator = (speed) => {
-  const speedometer = document.querySelector("#speedometer");
-  if (!speedometer) return;
-
-  const percentage = Math.round((speed / MAX_SPEED) * 100);
-  speedometer.textContent = `Speed: ${percentage}%`;
-
-  // Dynamic color feedback
-  if (percentage > 70) speedometer.style.color = "#ff4444";
-  else if (percentage > 30) speedometer.style.color = "#ffaa44";
-  else speedometer.style.color = "#44ff44";
-};
-
-const setup = async () => {
-  // Added Safari-safe worker & wasm paths
-  mindarThree = new MindARThree({
-    container: document.querySelector("#container"),
-    maxTrack: 1,
-    filterMinCF: 0.001,
-    workerUrl: new URL("mindar-face-worker.js", import.meta.url).href,
-    wasmUrl: new URL("mindar-face.wasm", import.meta.url).href,
-  });
-
-  const { scene } = mindarThree;
-
-  // Lighting setup
-  const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
-  scene.add(light);
-
-  const directionalLight = new THREE.DirectionalLight(0xffffff, 0.5);
-  directionalLight.position.set(0, 1, 1);
-  scene.add(directionalLight);
-
-  // Environment map with try-catch for Safari texture loading issues
-  try {
-    const envTexture = new THREE.CubeTextureLoader()
-      .setPath("/textures/cubemap/")
-      .load(
-        ["px.jpg", "nx.jpg", "py.jpg", "ny.jpg", "pz.jpg", "nz.jpg"],
-        () => console.log("Env map loaded"),
-        undefined,
-        (err) => console.warn("Env map load failed:", err)
-      );
-    scene.environment = envTexture;
-  } catch (e) {
-    console.warn("Safari texture issue:", e);
-  }
-
-  // Background setup
-  createBackground(scene);
-
-  // Cube setup
-  const geometry = new THREE.BoxGeometry(0.3, 0.3, 0.3);
-  const material = new THREE.MeshPhysicalMaterial({
-    color: originalColor,
-    metalness: 0.8,
-    roughness: 0.2,
-    clearcoat: 1.0,
-    clearcoatRoughness: 0.1,
-    reflectivity: 1.0,
-    envMapIntensity: 1.0,
-    emissive: new THREE.Color(0x00ff00),
-    emissiveIntensity: 0.3,
-  });
-
-  cube = new THREE.Mesh(geometry, material);
-  cube.userData.baseScale = 1;
-
-  const anchor = mindarThree.addAnchor(0);
-  anchor.group.add(cube);
-  cube.position.set(0, 0.5, 0);
-
-  updateStatus("Setup complete. Tap to start camera...");
-};
-
-const start = async () => {
-  try {
-    if (!mindarThree) await setup();
-
-    const videoEl = document.querySelector("#camera-preview");
-
-    // Safari autoplay fix: muted + playsinline
-    videoEl.setAttribute("playsinline", true);
-    videoEl.setAttribute("autoplay", true);
-    videoEl.muted = true;
-
-    // Safari camera permission workaround — needs user gesture
-    const enableCamera = async () => {
-      document.body.removeEventListener("click", enableCamera);
-      await mindarThree.start();
-
-      const { renderer, camera, video } = mindarThree;
-
-      updateStatus("Tracking active. Blow to move forward!");
-
-      // Keep video preview (your camera) visible at bottom-left only
-      if (video && videoEl) {
-        videoEl.srcObject = video.srcObject || video.captureStream();
-        try {
-          await videoEl.play();
-        } catch (e) {
-          console.warn("Safari blocked video.play():", e);
-        }
-      }
-
-      // Hide the internal MindAR video (so only your preview shows)
-      if (video) video.style.display = "none";
-
-      // Main animation loop
-      renderer.setAnimationLoop(() => {
-        const estimate = mindarThree.getLatestEstimate();
-        let isBlowing = false;
-
-        if (estimate && estimate.blendshapes) {
-          isBlowing = handleBlendshapes(estimate.blendshapes);
-        }
-
-        // Keep cube scale consistent based on face distance
-        if (estimate && typeof estimate.scale === "number") {
-          const invScale = 1 / estimate.scale;
-          cube.scale.setScalar(cube.userData.baseScale * invScale);
-        }
-
-        updateBackground(isBlowing);
-        renderer.render(mindarThree.scene, camera);
-      });
-    };
-
-    // Attach the user interaction listener
-    document.body.addEventListener("click", enableCamera);
-    updateStatus("👆 Tap anywhere to enable camera");
-  } catch (err) {
-    console.error(err);
-    updateStatus("Error: " + err.message);
+  const speedEl = document.querySelector("#speedometer");
+  if (speedEl) {
+    const pct = Math.round((backgroundSpeed / MAX_SPEED) * 100);
+    speedEl.textContent = `Speed: ${pct}%`;
+    speedEl.style.color =
+      pct > 70 ? "#ff4444" : pct > 30 ? "#ffaa44" : "#44ff44";
   }
 };
 
@@ -217,39 +95,102 @@ const handleBlendshapes = (blendshapes) => {
     (c) => c.categoryName === "mouthPucker"
   );
 
-  const funnelScore = funnel ? funnel.score : 0;
-  const puckerScore = pucker ? pucker.score : 0;
+  const f = funnel?.score || 0;
+  const p = pucker?.score || 0;
+  const blowing = f > MOUTH_THRESHOLD || p > MOUTH_THRESHOLD;
 
-  const isBlowing =
-    funnelScore > MOUTH_BLOW_THRESHOLD || puckerScore > MOUTH_BLOW_THRESHOLD;
+  cube.material.color.setHex(blowing ? COLORS.alert : COLORS.normal);
+  updateStatus(
+    blowing
+      ? `🚀 MOVING! Funnel ${(f * 100).toFixed(0)}%, Pucker ${(p * 100).toFixed(
+          0
+        )}%`
+      : `Funnel ${(f * 100).toFixed(0)}%, Pucker ${(p * 100).toFixed(0)}%`
+  );
+  return blowing;
+};
 
-  if (isBlowing) {
-    cube.material.color.setHex(alertColor);
-    cube.material.metalness = 1;
-    cube.material.roughness = 0.05;
-    updateStatus(
-      `🚀 MOVING FORWARD! Funnel: ${(funnelScore * 100).toFixed(
-        0
-      )}%, Pucker: ${(puckerScore * 100).toFixed(0)}%`
-    );
-  } else {
-    cube.material.color.setHex(originalColor);
-    cube.material.metalness = 0.5;
-    cube.material.roughness = 0.5;
-    updateStatus(
-      `Funnel: ${(funnelScore * 100).toFixed(0)}%, Pucker: ${(
-        puckerScore * 100
-      ).toFixed(0)}%`
-    );
+async function setup() {
+  mindarThree = new MindARThree({
+    container: document.querySelector("#container"),
+    maxTrack: 1,
+    filterMinCF: 0.001,
+    workerUrl: new URL("mindar-face-worker.js", import.meta.url).href,
+    wasmUrl: new URL("mindar-face.wasm", import.meta.url).href,
+  });
+
+  const { scene } = mindarThree;
+
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1));
+  const dir = new THREE.DirectionalLight(0xffffff, 0.6);
+  dir.position.set(0, 1, 1);
+  scene.add(dir);
+
+  try {
+    const env = new THREE.CubeTextureLoader()
+      .setPath("/textures/cubemap/")
+      .load(["px.jpg", "nx.jpg", "py.jpg", "ny.jpg", "pz.jpg", "nz.jpg"]);
+    scene.environment = env;
+  } catch {
+    console.warn("Env map skipped");
   }
 
-  return isBlowing;
-};
+  createBackground(scene);
 
-const updateStatus = (msg) => {
-  const statusEl = document.querySelector("#status");
-  if (statusEl) statusEl.textContent = msg;
-};
+  const geo = new THREE.BoxGeometry(0.3, 0.3, 0.3);
+  const mat = new THREE.MeshPhysicalMaterial({
+    color: COLORS.normal,
+    metalness: 0.7,
+    roughness: 0.3,
+    clearcoat: 1.0,
+  });
+  cube = new THREE.Mesh(geo, mat);
+  cube.userData.baseScale = 1;
 
-// Start on load
+  const anchor = mindarThree.addAnchor(0);
+  anchor.group.add(cube);
+  cube.position.set(0, 0.5, 0);
+}
+
+async function start() {
+  updateStatus("Initializing...");
+  await setup();
+
+  const videoEl = document.querySelector("#camera-preview");
+  videoEl.setAttribute("playsinline", true);
+  videoEl.muted = true;
+
+  const enable = async () => {
+    document.body.removeEventListener("click", enable);
+    updateStatus("Starting camera...");
+
+    const stream = await getConstrainedCameraStream();
+    videoEl.srcObject = stream;
+    await videoEl.play();
+
+    await mindarThree.start({ video: videoEl });
+    const { renderer, camera } = mindarThree;
+
+    updateStatus("Tracking started — blow to move 🚀");
+
+    renderer.setAnimationLoop(() => {
+      const est = mindarThree.getLatestEstimate();
+      const blowing = est?.blendshapes
+        ? handleBlendshapes(est.blendshapes)
+        : false;
+
+      if (est?.scale) {
+        const inv = 1 / est.scale;
+        cube.scale.setScalar(cube.userData.baseScale * inv);
+      }
+
+      updateBackground(blowing);
+      renderer.render(mindarThree.scene, camera);
+    });
+  };
+
+  document.body.addEventListener("click", enable);
+  updateStatus("👆 Tap to start camera");
+}
+
 start();
